@@ -1270,6 +1270,10 @@ def apply_return_types(function_entry_point: Address, return_type_str: str) -> i
 
     function_manager = currentProgram.getFunctionManager()
     function = function_manager.getFunctionAt(convert_to_addr(function_entry_point))
+    if function.isThunk():
+        # A thunk's signature is its target's. Many method entries can share one stub target,
+        # so applying one here would overwrite the signature that every caller shares.
+        return 0
 
     return_data_type_object = prepare_data_type(return_type_str).data_type
     function.setReturnType(return_data_type_object, SourceType.USER_DEFINED)
@@ -1300,6 +1304,8 @@ def apply_parameter_tuples(
     # replace parameters
     function_manager = currentProgram.getFunctionManager()
     function = function_manager.getFunctionAt(convert_to_addr(function_entry_point))
+    if function.isThunk():
+        return 0
     try:
         function.replaceParameters(
             Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS,
