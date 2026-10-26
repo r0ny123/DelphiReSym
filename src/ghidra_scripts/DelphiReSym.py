@@ -179,23 +179,26 @@ def read_ptr(addr: Address, ptr_size: int) -> Address:
     )
 
 
-def read_pascal_str(addr: Address) -> str:
+def read_pascal_str(addr: Address, end: Address | None = None) -> str:
     """
     Read a Pascal-String from memory at the specified address.
 
     The string format expects the first byte to contain the length, followed by the corresponding
     characters whose number is equal to that length.
     """
-    pascal_str = ""
+    memory = currentProgram.getMemory()
+    size = memory.getByte(addr) & 0xFF
+    if end is not None and addr.add(size + 1) > end:
+        raise ValueError("Pascal string exceeds method record")
+    raw = bytes(memory.getByte(addr.add(i + 1)) & 0xFF for i in range(size))
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
 
-    memory_interface = currentProgram.getMemory()
-    pascal_str_len = memory_interface.getByte(addr) & 0xFF
 
-    first_char_addr = addr.add(1)
-    for i in range(pascal_str_len):
-        pascal_str += chr(memory_interface.getByte(first_char_addr.add(i)) & 0xFF)
-
-    return pascal_str
+def pascal_str_size(addr: Address) -> int:
+    return (currentProgram.getMemory().getByte(addr) & 0xFF) + 1
 
 
 @dataclass
@@ -297,6 +300,38 @@ def check_vmt_candidate(
     )
 
 
+import struct
+
+
+def iter_vmt_self_references(
+    binary: bytes, base: int, ptr_size: int, distance: int, start: int, end: int, alignment: int = 1
+):
+    """Yield RVAs whose complete pointer equals base + RVA + distance.
+
+    Within each address window the pointer's upper bytes are constant. Searching
+    for that necessary suffix in C avoids unpacking every byte or aligned slot.
+    Full-pointer verification preserves exactness, including carries and overlaps.
+    The exclusive end bounds the bytes available to read, not just pointer starts.
+    """
+    limit = min(end, len(binary)) - ptr_size + 1
+    max_pointer = (1 << (8 * ptr_size)) - 1
+    start = max(start, 0, -base - distance)
+    unpack = struct.Struct("<I" if ptr_size == 4 else "<Q").unpack_from
+    while start < limit:
+        expected = base + start + distance
+        if expected > max_pointer:
+            break
+        window_end = min(limit, start + 0x10000 - (expected & 0xFFFF))
+        needle = expected.to_bytes(ptr_size, "little")[2:]
+        position = binary.find(needle, start + 2, window_end + ptr_size - 1)
+        while position != -1:
+            offset = position - 2
+            if offset % alignment == 0 and unpack(binary, offset)[0] == base + offset + distance:
+                yield offset
+            position = binary.find(needle, position + 1, window_end + ptr_size - 1)
+        start = window_end
+
+
 def find_vmts(settings: ArchitectureSpecificSettings) -> list[Address]:
     """
     Scan the .text section for potential VMT addresses, using a sliding window approach to identify
@@ -307,38 +342,20 @@ def find_vmts(settings: ArchitectureSpecificSettings) -> list[Address]:
 
     text_block_size = settings.text_block_end_addr.subtract(settings.text_block_start_addr)
 
-    # PERF (2026-08-21): fast candidate pass.
-    # The original walked .text one byte at a time, crossing the JPype boundary about
-    # seven times per byte. On a 30 MB .text that is ~200 million crossings. This reads
-    # the section once and locates candidate offsets with vectorised arithmetic, then
-    # hands every candidate to the ORIGINAL check below. The fast pass is a superset:
-    # it can only add work, never remove a candidate the original would have accepted.
+    # Bulk discovery supports both pointer widths without NumPy.
     candidate_offsets = None
     try:
         import jpype
-        import numpy as np
-
         n_bytes = int(text_block_size) + 1
         jbuf = jpype.JArray(jpype.JByte)(n_bytes)
         got = currentProgram.getMemory().getBytes(settings.text_block_start_addr, jbuf)
-        if got == n_bytes and settings.ptr_size == 4:
-            a = np.frombuffer(memoryview(jbuf), dtype=np.uint8)
-            n = n_bytes - (settings.ptr_size - 1)
-            v = (
-                a[0:n].astype(np.uint32)
-                | (a[1:n + 1].astype(np.uint32) << 8)
-                | (a[2:n + 2].astype(np.uint32) << 16)
-                | (a[3:n + 3].astype(np.uint32) << 24)
+        if got == n_bytes:
+            raw = bytes(memoryview(jbuf))
+            candidate_offsets = iter_vmt_self_references(
+                raw, int(settings.text_block_start_addr.getOffset()),
+                settings.ptr_size, settings.jump_dist, 0, len(raw)
             )
-            base = int(settings.text_block_start_addr.getOffset())
-            offs = (base + np.arange(n, dtype=np.int64)) & 0xFFFFFFFF
-            diff = (v.astype(np.int64) - offs) & 0xFFFFFFFF
-            candidate_offsets = np.nonzero(diff == int(settings.jump_dist))[0]
-            info(
-                f"[1/8] Fast pass: {len(candidate_offsets)} candidate(s) in "
-                f"{n_bytes} bytes of .text."
-            )
-    except Exception as exc:  # numpy missing, uninitialised memory, 64-bit, anything
+    except Exception as exc:
         warning(f"[1/8] Fast pass unavailable ({exc}); falling back to the byte walk.")
         candidate_offsets = None
 
@@ -498,7 +515,7 @@ def traverse_rtti_object(addr: Address, settings: ArchitectureSpecificSettings) 
         return rtti_object_name
 
     rtti_namespace_field = rtti_object_name_field.add(
-        len(rtti_object_name) + 1 + 2 * settings.ptr_size + 2
+        pascal_str_size(rtti_object_name_field) + 2 * settings.ptr_size + 2
     )
     rtti_namespace = read_pascal_str(rtti_namespace_field)
 
@@ -582,8 +599,15 @@ def traverse_mdt_top_level(
     for vmt_addr, mdt_addr in vmt_mdt_relations.items():
         check_cancel()
 
+        published_count = memory_interface.getShort(mdt_addr) & 0xFFFF
         num_of_method_entry_refs_field = mdt_addr.add(2)
-        num_of_method_entry_refs = memory_interface.getShort(num_of_method_entry_refs_field)
+        for _ in range(published_count):
+            check_cancel()
+            entry_size = memory_interface.getShort(num_of_method_entry_refs_field) & 0xFFFF
+            if entry_size < settings.ptr_size + 3:
+                raise ValueError("Invalid published method record length")
+            num_of_method_entry_refs_field = num_of_method_entry_refs_field.add(entry_size)
+        num_of_method_entry_refs = memory_interface.getShort(num_of_method_entry_refs_field) & 0xFFFF
         if num_of_method_entry_refs == 0:
             continue
 
@@ -605,6 +629,7 @@ def traverse_parameter_entries(
     first_parameter_entry_addr: Address,
     num_of_parameter_entries: int,
     settings: ArchitectureSpecificSettings,
+    end: Address | None = None,
 ) -> dict[Address, ParameterInfo]:
     """
     Traverse a sequence of ParamEntries and extract relevant RTTI and naming information.
@@ -632,6 +657,8 @@ def traverse_parameter_entries(
 
         # grab information
         parameter_entry_addr = current_addr
+        if end is not None and current_addr.add(settings.ptr_size + 3) > end:
+            raise ValueError("Parameter header exceeds method record")
         try:
             rtti = read_ptr(read_ptr(current_addr, settings.ptr_size), settings.ptr_size)
             rtti_namespace = traverse_rtti_object(rtti, settings)
@@ -639,7 +666,7 @@ def traverse_parameter_entries(
             rtti = None
             rtti_namespace = None
         parameter_name_addr = current_addr.add(settings.ptr_size + 2)
-        parameter_name = read_pascal_str(parameter_name_addr)
+        parameter_name = read_pascal_str(parameter_name_addr, end)
 
         # store information
         parameter_entries_info[parameter_entry_addr] = ParameterInfo(
@@ -647,7 +674,9 @@ def traverse_parameter_entries(
         )
 
         # next ParamEntry
-        current_addr = parameter_name_addr.add(len(parameter_name) + 1 + 3)
+        current_addr = parameter_name_addr.add(pascal_str_size(parameter_name_addr) + 3)
+        if end is not None and current_addr > end:
+            raise ValueError("Parameter exceeds method record")
 
     return parameter_entries_info
 
@@ -670,7 +699,7 @@ def extract_function_entry_point(
 
 
 def extract_function_name(
-    method_entry_addr: Address, settings: ArchitectureSpecificSettings
+    method_entry_addr: Address, settings: ArchitectureSpecificSettings, end: Address | None = None
 ) -> str | None:
     """
     Extract the name of a function given a specific MethodEntry address.
@@ -684,7 +713,7 @@ def extract_function_name(
     """
     name_of_function_addr = method_entry_addr.add(settings.ptr_size + 2)
     try:
-        function_name = read_pascal_str(name_of_function_addr)
+        function_name = read_pascal_str(name_of_function_addr, end)
         return function_name
     except MemoryAccessException:
         warning(f"Grab of nameOfFunctionAddr failed. Skipping ME: {method_entry_addr}.")
@@ -692,7 +721,8 @@ def extract_function_name(
 
 
 def extract_return_type(
-    method_entry_addr: Address, function_name_len: int, settings: ArchitectureSpecificSettings
+    method_entry_addr: Address, function_name_len: int, settings: ArchitectureSpecificSettings,
+    end: Address | None = None,
 ) -> tuple[Address, str] | tuple[None, None]:
     """
     Extract the return type of a function given a specific MethodEntry address.
@@ -710,6 +740,8 @@ def extract_return_type(
     all_zero_addr = convert_to_addr("0x0")
 
     return_type_addr_field = method_entry_addr.add(function_name_len + settings.ptr_size + 4)
+    if end is not None and return_type_addr_field.add(settings.ptr_size) > end:
+        return None, None
     try:
         dereferenced_return_type_addr = read_ptr(return_type_addr_field, settings.ptr_size)
         return_type_at = dereferenced_return_type_addr
@@ -732,7 +764,8 @@ def extract_return_type(
 
 
 def extract_parameters(
-    method_entry_addr: Address, function_name_len: int, settings: ArchitectureSpecificSettings
+    method_entry_addr: Address, function_name_len: int, settings: ArchitectureSpecificSettings,
+    end: Address | None = None,
 ) -> dict[Address, ParameterInfo] | None:
     """
     Extract the parameter information of a function given a specific MethodEntry address.
@@ -752,6 +785,8 @@ def extract_parameters(
     num_of_parameter_entries_field = method_entry_addr.add(
         function_name_len + 2 * settings.ptr_size + 6
     )
+    if end is not None and num_of_parameter_entries_field.add(2) > end:
+        return None
     num_of_parameter_entries = memory_interface.getByte(num_of_parameter_entries_field) & 0xFF
 
     first_parameter_entry_field = num_of_parameter_entries_field.add(2)
@@ -764,7 +799,7 @@ def extract_parameters(
         return None
 
     return traverse_parameter_entries(
-        first_parameter_entry_field, num_of_parameter_entries, settings
+        first_parameter_entry_field, num_of_parameter_entries, settings, end
     )
 
 
@@ -806,20 +841,32 @@ def traverse_method_entries(
             except AddressOutOfBoundsException:
                 break
 
-            function_name = extract_function_name(method_entry_addr, settings)
+            target_block = currentProgram.getMemory().getBlock(function_entry_point)
+            if target_block is None or not target_block.isExecute():
+                continue
+            record_size = currentProgram.getMemory().getShort(method_entry_addr) & 0xFFFF
+            if record_size < settings.ptr_size + 3:
+                continue
+            record_end = method_entry_addr.add(record_size)
+            try:
+                function_name = extract_function_name(method_entry_addr, settings, record_end)
+            except (ValueError, MemoryAccessException):
+                continue
             if not function_name:
                 continue
 
             return_type_addr, return_type_str = extract_return_type(
-                method_entry_addr, len(function_name) + 1, settings
+                method_entry_addr, pascal_str_size(method_entry_addr.add(settings.ptr_size + 2)), settings, record_end
             )
             if not (return_type_addr or return_type_str):
-                continue
+                return_type_str = None
 
-            params = extract_parameters(method_entry_addr, len(function_name) + 1, settings)
-            if not params:
-                del vmt_mdt_top_info.entries[vmt]
-                break
+            try:
+                params = extract_parameters(method_entry_addr, pascal_str_size(method_entry_addr.add(settings.ptr_size + 2)), settings, record_end)
+            except (ValueError, MemoryAccessException):
+                params = None
+            if params is None:
+                params = {}
 
             # store gathered information
             method_entry_info = MeInfo(
