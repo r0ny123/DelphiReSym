@@ -601,12 +601,16 @@ def traverse_mdt_top_level(
 
         published_count = memory_interface.getShort(mdt_addr) & 0xFFFF
         num_of_method_entry_refs_field = mdt_addr.add(2)
+        valid_published = True
         for _ in range(published_count):
             check_cancel()
             entry_size = memory_interface.getShort(num_of_method_entry_refs_field) & 0xFFFF
             if entry_size < settings.ptr_size + 3:
-                raise ValueError("Invalid published method record length")
+                valid_published = False
+                break
             num_of_method_entry_refs_field = num_of_method_entry_refs_field.add(entry_size)
+        if not valid_published:
+            continue
         num_of_method_entry_refs = memory_interface.getShort(num_of_method_entry_refs_field) & 0xFFFF
         if num_of_method_entry_refs == 0:
             continue
