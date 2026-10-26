@@ -1157,7 +1157,16 @@ def add_virtual_data_type(
     )
     insert_virtual_functions_to_vt_data_type(vt_data_type, vmt_addr, settings)
 
-    vt_data_type = data_types.addDataType(vt_data_type, DataTypeConflictHandler.REPLACE_HANDLER)
+    # Replacing an existing type makes Ghidra rescan the whole listing and symbol table, so on
+    # repeated runs keep a changed struct and update it in place.
+    existing = data_types.getDataType(CategoryPath("/"), vt_data_type_name)
+    if existing is None:
+        vt_data_type = data_types.addDataType(vt_data_type, DataTypeConflictHandler.REPLACE_HANDLER)
+    elif existing.isEquivalent(vt_data_type):
+        vt_data_type = existing
+    else:
+        existing.replaceWith(vt_data_type)
+        vt_data_type = existing
 
     component_offset = 12 * ptr_size
     typedef_data_type = PointerTypedef(
