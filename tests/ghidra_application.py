@@ -49,6 +49,7 @@ def main():
     parser.add_argument('--legacy', action='store_true')
     parser.add_argument('--minimum-labels', type=int, default=1)
     parser.add_argument('--disable-analyzer', action='append', default=[])
+    parser.add_argument('--required-entry', action='append', default=[])
     args = parser.parse_args()
 
     import pyghidra
@@ -80,7 +81,7 @@ def main():
         module.__dict__.update(
             currentProgram=program, monitor=TaskMonitor.DUMMY, toAddr=flat.toAddr,
             createFunction=flat.createFunction, createClass=flat.createClass,
-            getFunctionAt=flat.getFunctionAt,
+            getFunctionAt=flat.getFunctionAt, disassemble=flat.disassemble,
         )
         source_text = source.read_text()
         source_sha256 = hashlib.sha256(source_text.encode()).hexdigest()
@@ -115,8 +116,16 @@ def main():
             check_tobject(program)
             assert vt_components > 0
             assert len(expected_names) >= args.minimum_labels
+            assert original.keys() <= passes[-1].keys()
+            for address in args.required_entry:
+                assert address in expected_names, f"Missing required metadata entry: {address}"
             for address, name in expected_names.items():
-                assert address in passes[-1], f'Missing recovered function: {address}'
+                target = flat.toAddr(address)
+                assert address in passes[-1], (
+                    f'Missing recovered function: {address}; '
+                    f'containing function={program.getFunctionManager().getFunctionContaining(target)}; '
+                    f'code unit={program.getListing().getCodeUnitContaining(target)}'
+                )
                 assert passes[-1][address]['name'].endswith('::' + name), address
         result = {
             'binary': args.binary.name,

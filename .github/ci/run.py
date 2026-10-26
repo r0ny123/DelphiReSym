@@ -16,6 +16,8 @@ results.mkdir(parents=True, exist_ok=True)
 command = [sys.executable, '-u', str(repo / 'tests/ghidra_application.py'),
            str(args.root / sample['name']), '--ghidra', str(args.root / 'ghidra_12.2_PUBLIC'),
            '--output', str(results / 'application.json'), '--minimum-labels', str(sample['minimum_labels'])]
+for address in sample.get('required_entries', []):
+    command.extend(['--required-entry', address])
 if sample['legacy']:
     command.append('--legacy')
 for analyzer in sample['disabled_analyzers']:

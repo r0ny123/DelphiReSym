@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, cast, Optional, Any, NamedTuple
 from dataclasses import dataclass, field
 
 if TYPE_CHECKING:
-    from ghidra.ghidra_builtins import createFunction, createClass, getFunctionAt  # type: ignore
+    from ghidra.ghidra_builtins import createFunction, createClass, getFunctionAt, disassemble  # type: ignore
 
 from ghidra.program.model.symbol import SourceType, Namespace  # type: ignore
 from ghidra.program.model.listing import ParameterImpl, Function, Program  # type: ignore
@@ -1005,6 +1005,31 @@ def prepare_namespace(namespace_str: str) -> Namespace:
     return parent_namespace
 
 
+def recover_function(address: Address, name: str | None = None) -> Function | None:
+    function = currentProgram.getFunctionManager().getFunctionAt(address)
+    if function is not None:
+        return function
+    block = currentProgram.getMemory().getBlock(address)
+    if block is None or not block.isExecute():
+        return None
+    listing = currentProgram.getListing()
+    if listing.getInstructionAt(address) is None:
+        instruction = listing.getInstructionContaining(address)
+        cleared = 0
+        while instruction is not None and cleared < 0x10000:
+            start, end = instruction.getMinAddress(), instruction.getMaxAddress()
+            manager = currentProgram.getFunctionManager()
+            if manager.getFunctionContaining(start) or manager.getFunctionContaining(end):
+                break
+            listing.clearCodeUnits(start, end, False)
+            cleared += end.subtract(start) + 1
+            if end >= block.getEnd():
+                break
+            instruction = listing.getInstructionAt(end.add(1))
+    disassemble(address)
+    return createFunction(address, name)
+
+
 def add_data_to_vt_data_type(
     vt_data_type: StructureDataType,
     start_address: Address,
@@ -1022,16 +1047,14 @@ def add_data_to_vt_data_type(
 
     for i in range(number_of_addresses):
         function_address = read_ptr(start_address.add(i * ptr_size), ptr_size)
-        function = getFunctionAt(function_address)
-        if function is None:
-            function = createFunction(function_address, None)
+        function = recover_function(function_address)
         if function is None:
             continue
         vt_data_type.insertAtOffset(
             (i + insertion_offset) * ptr_size,
             PointerDataType(function.getSignature(), ptr_size),
             ptr_size,
-            getFunctionAt(function_address).getName(),
+            function.getName(),
             vt_data_type_comment,
         )
 
@@ -1210,18 +1233,10 @@ def apply_function_names(function_entry_point: Address, function_name: str | Non
 
     Returns 1 on a success or 0 if no function name was applied.
     """
-    function_manager = currentProgram.getFunctionManager()
-    function = function_manager.getFunctionAt(convert_to_addr(function_entry_point))
-
-    # if ghidra doesn't recognize this address already as a function
-    if not function:
-        # creating via the light-weight FlatProgramAPI function sets a name automatically
-        function = createFunction(convert_to_addr(function_entry_point), function_name)
-        if function is None:
-            return 0
-    else:
-        # if function is already been known to ghidra, replace its name
-        function.setName(function_name, SourceType.USER_DEFINED)
+    function = recover_function(convert_to_addr(function_entry_point), function_name)
+    if function is None:
+        return 0
+    function.setName(function_name, SourceType.USER_DEFINED)
 
     return 1
 

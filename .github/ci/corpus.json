@@ -64,7 +64,10 @@
       "source_sha256": "8117d10d00a2ad33a1390978ea3872861c330e087914410a6377b22c4c5b8563",
       "legacy": false,
       "minimum_labels": 890,
-      "disabled_analyzers": []
+      "disabled_analyzers": [],
+      "required_entries": [
+        "0041f530"
+      ]
     },
     "inno-athens-x64": {
       "name": "innosetup-7.1.0-x64.exe",
