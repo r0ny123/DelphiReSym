@@ -236,12 +236,21 @@ def get_architecture_settings(text_section: MemoryBlock) -> ArchitectureSpecific
 
 def get_text_section(memory: Memory) -> MemoryBlock:
     """
-    Retrieve the '.text' memory block from the given memory object.
+    Retrieve the '.text' memory block, or the only executable block if it has another name.
     """
-    for section in memory.getBlocks():
+    sections = list(memory.getBlocks())
+    for section in sections:
         if section.getName() == ".text":
             return section
-    raise Exception(".text segment not found")
+
+    executable_sections = [section for section in sections if section.isExecute()]
+    if len(executable_sections) == 1:
+        return executable_sections[0]
+    if executable_sections:
+        raise Exception(
+            "'.text' segment not found and multiple executable memory blocks are ambiguous"
+        )
+    raise Exception("'.text' segment or executable memory block not found")
 
 
 ###################################################################################################
