@@ -53,5 +53,37 @@ class StringTests(unittest.TestCase):
         with self.assertRaises(IndexError):
             ns['read_pascal_str'](Address(0))
 
+
+class ApplicationTests(unittest.TestCase):
+    def test_missing_signature_is_not_applied_as_void_or_no_parameters(self):
+        from types import SimpleNamespace
+        tree = ast.parse(SOURCE.read_text())
+        functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'apply_symbols']
+        calls = []
+        ns = {'VmtMdtMapping': object, 'ArchitectureSpecificSettings': object,
+              'debug': lambda *args: None, 'check_cancel': lambda: None,
+              'prepare_data_type': lambda *args: SimpleNamespace(namespace='Unit.T'),
+              'apply_function_names': lambda *args: 1,
+              'apply_namespaces': lambda *args: 1,
+              'apply_return_types': lambda entry, typ: calls.append(('return', typ)) or 0,
+              'apply_parameter_tuples': lambda *args: calls.append(('params', args[1])) or 1}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), ns)
+        method = SimpleNamespace(function_name='Method', function_entry_point=1,
+                                 return_type_str=None, parameter_entries={}, parameters_valid=False)
+        mapping = SimpleNamespace(entries={1: SimpleNamespace(namespace='Unit.T', method_entries={2: method})})
+        result = ns['apply_symbols'](mapping, object())
+        self.assertEqual(calls, [('return', None)])
+        self.assertEqual(result['parameter_set'], 0)
+        method.parameters_valid = True
+        calls.clear()
+        result = ns['apply_symbols'](mapping, object())
+        self.assertEqual(result['parameter_set'], 1)
+        self.assertIn(('params', {}), calls)
+        method.function_name = None
+        calls.clear()
+        result = ns['apply_symbols'](mapping, object())
+        self.assertEqual(result['function'], 0)
+        self.assertEqual(calls, [])
+
 if __name__ == '__main__':
     unittest.main()

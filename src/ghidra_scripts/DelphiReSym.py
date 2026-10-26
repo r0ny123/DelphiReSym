@@ -37,7 +37,7 @@ from ghidra.program.model.data import (  # type: ignore
     IntegerDataType,
     ShortDataType,
     CharDataType,
-    UnsignedIntegerDataType,
+    UnsignedLongLongDataType,
     ByteDataType,
     CategoryPath,
     StructureDataType,
@@ -105,7 +105,7 @@ data_type_mapping = {
     "SmallInt": ShortDataType,
     "Pointer": PointerDataType,
     "Char": CharDataType,
-    "UInt64": UnsignedIntegerDataType,
+    "UInt64": UnsignedLongLongDataType,
     "Byte": ByteDataType,
     # not StringDataType since it is a factory datatype
     "string": lambda: PointerDataType(CharDataType()),
@@ -463,6 +463,7 @@ class MeInfo:
     return_type_at: Optional[Address | str] = "n.a."
     return_type_str: Optional[str] = None
     parameter_entries: dict[Address, ParameterInfo] = field(default_factory=dict)
+    parameters_valid: bool = True
 
     def get_return_type_string(self) -> str:
         if (type_string := self.return_type_str) is None:
@@ -869,8 +870,6 @@ def traverse_method_entries(
                 params = extract_parameters(method_entry_addr, pascal_str_size(method_entry_addr.add(settings.ptr_size + 2)), settings, record_end)
             except (ValueError, MemoryAccessException):
                 params = None
-            if params is None:
-                params = {}
 
             # store gathered information
             method_entry_info = MeInfo(
@@ -878,7 +877,8 @@ def traverse_method_entries(
                 function_name=function_name,
                 return_type_at=return_type_addr,
                 return_type_str=return_type_str,
-                parameter_entries=params,
+                parameter_entries=params or {},
+                parameters_valid=params is not None,
             )
             method_entries_info.method_entries[method_entry_addr] = method_entry_info
 
@@ -1029,7 +1029,7 @@ def add_data_to_vt_data_type(
             continue
         vt_data_type.insertAtOffset(
             (i + insertion_offset) * ptr_size,
-            PointerDataType(function.getSignature()),
+            PointerDataType(function.getSignature(), ptr_size),
             ptr_size,
             getFunctionAt(function_address).getName(),
             vt_data_type_comment,
@@ -1322,6 +1322,8 @@ def apply_symbols(
 
         for _, me_info in mdt_me_info.method_entries.items():
             check_cancel()
+            if not me_info.function_name:
+                continue
             entry = me_info.function_entry_point
 
             if not apply_function_names(entry, me_info.function_name):
@@ -1331,10 +1333,10 @@ def apply_symbols(
             if apply_namespaces(entry, namespace):
                 apply_count["fqn"] += 1
 
-            if apply_return_types(entry, me_info.get_return_type_string()):
+            if apply_return_types(entry, me_info.return_type_str):
                 apply_count["return"] += 1
 
-            if apply_parameter_tuples(entry, me_info.parameter_entries, mdt_me_info.namespace):
+            if me_info.parameters_valid and apply_parameter_tuples(entry, me_info.parameter_entries, mdt_me_info.namespace):
                 apply_count["parameter_set"] += 1
 
     return apply_count
