@@ -1,5 +1,7 @@
 """Run one verified real-binary fixture in an isolated Ghidra process."""
 import argparse
+from collections import deque
+import os
 import json
 import subprocess
 import sys
@@ -22,11 +24,16 @@ if sample['legacy']:
     command.append('--legacy')
 for analyzer in sample['disabled_analyzers']:
     command.extend(['--disable-analyzer', analyzer])
+tail = deque(maxlen=12)
 with (results / 'run.log').open('w') as log:
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for line in process.stdout:
+        tail.append(line)
         log.write(line)
         log.flush()
         print(line, end='', flush=True)
     code = process.wait()
+if code and os.environ.get('GITHUB_ACTIONS') == 'true':
+    detail = ''.join(tail)[-6000:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+    print('::error title=Ghidra recovery failed::' + detail, flush=True)
 sys.exit(code)
