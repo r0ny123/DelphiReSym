@@ -1355,7 +1355,7 @@ def print_final_stats(
     Print after-execution-statistics, including function counts, VMT counts and percentages of
     recovered symbolic information.
     """
-    if total_function_count == 0 or original_function_count == 0:
+    if total_function_count == 0 or original_function_count == 0 or vmt_count == 0:
         info("[8/8] Statistics: No functions found.")
         return
 
